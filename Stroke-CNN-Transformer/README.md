@@ -1,8 +1,8 @@
 # Stroke-CNN-Transformer
 
 以论文基线 **nnU-Net / Cl-SegNet（Coformer3D 混合 CNN-Transformer）** 为基础，构建的
-急性缺血性卒中（AIS）NCCT 3D 病灶分割网络。代码在 `model.py`，**自包含、仅依赖 `torch`**，
-不引入 nnU-Net / ClSeg。
+急性缺血性卒中（AIS）NCCT 3D 病灶分割网络。模型在 `model.py`（**自包含、仅依赖 `torch`**，
+不引入 nnU-Net / ClSeg）；并附完整的训练/验证/评估/可视化脚本（见第 8 节）。
 
 体素级输出：最终经 `Sigmoid` 生成取值 `[0,1]` 的病灶概率图。
 
@@ -173,4 +173,64 @@ python Stroke-CNN-Transformer/model.py
 # 打印参数量(M)、输入/输出形状；输出应为 (1,1,16,160,160)，值域[0,1]
 ```
 
-依赖：仅 `torch`（建议 ≥1.11，与论文环境一致）。
+`model.py` 依赖：仅 `torch`（建议 ≥1.11，与论文环境一致）。
+
+---
+
+## 8. 训练 / 验证 / 评估 / 可视化
+
+本文件夹还提供完整的训练-评估闭环（同目录脚本，直接 `python` 运行，使用同级 import）：
+
+| 文件 | 作用 | 依赖 |
+|------|------|------|
+| `dataset.py` | 读取 `reproduce/` 生成的 `<pid>/CT.nii.gz`、`GT_hard.nii.gz`；脑窗 `[0,60]`+z-score 归一化；训练随机前景偏置 patch；验证/测试**滑窗推理** | torch, numpy, SimpleITK |
+| `losses.py` | `BCEDiceLoss`（Dice 缓解类别不平衡）+ 可选深监督加权 | torch |
+| `metrics.py` | Dice、HD95、PA、mPA、IoU、mIoU、Precision、Recall、F1 | numpy, scipy |
+| `train.py` | 训练 + 周期性验证（AdamW+余弦+AMP），按验证 Dice 存 `best.pth`，输出训练曲线 | torch, matplotlib |
+| `evaluate.py` | 在 test 上逐例算全部指标并汇总，输出 CSV/报告/柱状图/叠加图 | torch, scipy, matplotlib |
+| `visualize.py` | 训练曲线、指标柱状图、预测叠加图（红=预测，绿描边=GT） | matplotlib, scipy |
+
+### 数据准备
+先用本仓库 `reproduce/aisd_dicom_to_nii.py` 把 DICOM+掩膜转成
+`<AISD_nii>/<pid>/{CT.nii.gz,GT_hard.nii.gz}`，划分沿用 `data/splits_final.pkl`。
+
+### 训练（含验证）
+```bash
+python Stroke-CNN-Transformer/train.py \
+    --data-root /path/to/AISD_nii \
+    --splits-pkl data/splits_final.pkl \
+    --out-dir Stroke-CNN-Transformer/runs/exp1 \
+    --epochs 200 --batch-size 2 --patch-size 16 160 160 --amp --gpu 0
+```
+产出：`best.pth` / `last.pth`、`history.json`、`training_curves.png`（loss 与
+验证 Dice/IoU 曲线）。`--deep-supervision` 可开启深监督。
+
+### 评估（多指标 + 可视化）
+```bash
+python Stroke-CNN-Transformer/evaluate.py \
+    --data-root /path/to/AISD_nii \
+    --splits-pkl data/splits_final.pkl \
+    --checkpoint Stroke-CNN-Transformer/runs/exp1/best.pth \
+    --split test --out-dir Stroke-CNN-Transformer/runs/exp1/eval_test
+```
+产出：
+- `per_case_metrics.csv`：每个病人 9 项指标；
+- `summary.txt`：全测试集平均（Dice / HD95 / PA / mPA / IoU / mIoU / Precision / Recall / F1）；
+- `metrics_bar.png`：各指标柱状图（HD95 单位不同，单独排除）；
+- `<pid>_overlay.png`：若干病例的切片叠加图（**红=预测病灶，绿色描边=金标准**）。
+
+### 指标定义（二值分割，类别 = 背景/病灶）
+| 指标 | 含义/公式 |
+|------|----------|
+| Dice | `2TP/(2TP+FP+FN)` |
+| HD95 | 预测与 GT 表面距离的 95 分位（mm，用真实体素间距） |
+| PA（像素准确率） | `(TP+TN)/总数` |
+| mPA（平均像素准确率） | 背景/病灶两类召回的均值 |
+| IoU（并交比，前景） | `TP/(TP+FP+FN)` |
+| mIoU（平均并交比） | 前景/背景 IoU 的均值 |
+| Precision | `TP/(TP+FP)` |
+| Recall（灵敏度） | `TP/(TP+FN)` |
+| F1 | `2·P·R/(P+R)`（二值下数值等于 Dice） |
+
+> 依赖安装：`pip install torch SimpleITK scipy matplotlib numpy`。
+> 当前环境无这些库，脚本仅做了语法校验；请在本地装好后运行。
